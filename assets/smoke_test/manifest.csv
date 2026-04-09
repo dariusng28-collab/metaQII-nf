@@ -1,0 +1,5 @@
+sample-id,absolute-filepath,direction
+H1,/mnt/c/Users/dariu/OneDrive/Documents/New project/assets/smoke_test/fastq/H1.fastq,forward
+H2,/mnt/c/Users/dariu/OneDrive/Documents/New project/assets/smoke_test/fastq/H2.fastq,forward
+D1,/mnt/c/Users/dariu/OneDrive/Documents/New project/assets/smoke_test/fastq/D1.fastq,forward
+D2,/mnt/c/Users/dariu/OneDrive/Documents/New project/assets/smoke_test/fastq/D2.fastq,forward

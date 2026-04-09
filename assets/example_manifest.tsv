@@ -1,0 +1,5 @@
+sample-id	absolute-filepath	direction
+SampleA	/absolute/path/to/SampleA_R1.fastq.gz	forward
+SampleA	/absolute/path/to/SampleA_R2.fastq.gz	reverse
+SampleB	/absolute/path/to/SampleB_R1.fastq.gz	forward
+SampleB	/absolute/path/to/SampleB_R2.fastq.gz	reverse

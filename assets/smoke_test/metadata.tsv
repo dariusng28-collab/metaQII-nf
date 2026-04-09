@@ -1,0 +1,5 @@
+#SampleID	state_of_disease	collection_site
+H1	Healthy	SmokeTest
+H2	Healthy	SmokeTest
+D1	Disease	SmokeTest
+D2	Disease	SmokeTest

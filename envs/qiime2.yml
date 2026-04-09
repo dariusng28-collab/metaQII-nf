@@ -1,0 +1,19 @@
+name: metaqii-nextflow-qiime2-2026.1
+channels:
+  - qiime2
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python=3.10
+  - qiime2=2026.1
+  - fastqc
+  - itsxpress
+  - pandas
+  - seaborn
+  - matplotlib-base
+  - biom-format
+  - scikit-bio
+  - pip
+  - pip:
+      - q2-itsxpress

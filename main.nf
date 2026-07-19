@@ -25,8 +25,6 @@ include {
     DUMP_VERSIONS
 } from './modules/local/metaqii'
 
-import groovy.json.JsonOutput
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -92,7 +90,9 @@ workflow {
     // --- Classification method + its inputs --------------------------------
     def placeholder = file("${projectDir}/assets/NO_PHYLOGENY")
     def classifyMethod = (params.classification_method ?: 'sklearn').toString().toLowerCase()
-    def classifierFile, refReadsFile, refTaxonomyFile
+    def classifierFile
+    def refReadsFile
+    def refTaxonomyFile
     if (classifyMethod == 'sklearn') {
         classifierFile  = requireExistingPath('classifier', params.classifier)
         refReadsFile    = placeholder
@@ -355,36 +355,29 @@ workflow {
 
     BUILD_REPORT(report_qzvs, plots.plots)
 
-    // --- Provenance: record tool versions ----------------------------------
+    // --- Provenance --------------------------------------------------------
+    // Record software versions (process) and the resolved params + run info.
+    // These are written from the workflow body using launch-time values; run
+    // status, duration and per-task resources are in pipeline_info/report.html
+    // and trace.txt. (A top-level onComplete handler is not used because the
+    // strict config/DSL parser in Nextflow >=26 disallows it.)
     DUMP_VERSIONS()
-}
 
-// ---------------------------------------------------------------------------
-// Run summary + resolved parameters (for reproducibility)
-// ---------------------------------------------------------------------------
-
-workflow.onComplete {
     def infoDir = file("${params.outdir}/pipeline_info")
     infoDir.mkdirs()
 
-    file("${infoDir}/params.json").text = JsonOutput.prettyPrint(JsonOutput.toJson(params))
+    file("${infoDir}/params.json").text =
+        groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([:] + params))
 
-    file("${infoDir}/run_summary.txt").text = """\
-        metaQII-nf run summary
-        ======================
+    file("${infoDir}/run_info.txt").text = """\
+        metaQII-nf
+        ==========
         pipeline version : ${workflow.manifest.version}
-        run name         : ${workflow.runName}
-        session id       : ${workflow.sessionId}
-        started          : ${workflow.start}
-        completed        : ${workflow.complete}
-        duration         : ${workflow.duration}
-        success          : ${workflow.success}
-        exit status      : ${workflow.exitStatus}
-        command line     : ${workflow.commandLine}
         nextflow version : ${workflow.nextflow.version}
+        command line     : ${workflow.commandLine}
+        launched         : ${workflow.start}
         container        : ${params.container}
         output directory : ${params.outdir}
+        (run status, duration and resource usage: see pipeline_info/report.html and trace.txt)
     """.stripIndent()
-
-    log.info "[metaQII] ${workflow.success ? 'Completed successfully' : 'Finished with errors'} — outputs in ${params.outdir}"
 }

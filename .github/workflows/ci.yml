@@ -9,6 +9,10 @@ on:
 # Fast, dependency-light gate: compile the workflow, build its DAG, and
 # syntax-check the Python helpers. This does not execute QIIME 2 (which needs
 # the multi-GB container); it catches wiring/typing/regression errors quickly.
+env:
+  # Pin Nextflow for deterministic CI (the config targets >=24.04).
+  NXF_VER: '26.04.6'
+
 jobs:
   lint-compile:
     name: Compile & lint

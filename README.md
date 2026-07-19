@@ -335,7 +335,7 @@ results/
 ├── 08_plots/                  # PDF plots: alpha diversity, PCoA, taxonomic composition
 ├── 09_report/                 # Consolidated index.html linking every .qzv and figure
 └── pipeline_info/             # trace, timeline, report, DAG + software_versions.yml,
-                               # params.json and run_summary.txt (provenance)
+                               # params.json and run_info.txt (provenance)
 ```
 
 Open `09_report/index.html` in a browser for a single entry point; interactive `.qzv` files render at [view.qiime2.org](https://view.qiime2.org) (drag-and-drop, nothing is uploaded).

@@ -796,3 +796,4 @@ dependencies:
 - itsxpress
 - pip:
   - q2-itsxpress
+  - multiqc

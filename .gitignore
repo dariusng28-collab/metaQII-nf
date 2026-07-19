@@ -1,5 +1,22 @@
+# Nextflow
 .nextflow*
 .nextflow.log*
-.DS_Store
 work/
+
+# Pipeline outputs
 results/
+results_*/
+preview_results/
+smoke_results/
+*_results/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# R
+.Rhistory
+
+# OS / editor
+.DS_Store
+*Zone.Identifier

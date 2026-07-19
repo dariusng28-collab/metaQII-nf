@@ -1,3 +1,0 @@
-task_id	hash	native_id	name	status	exit	submit	duration	realtime	%cpu	peak_rss	peak_vmem	rchar	wchar
-1	20/b39d42	764	IMPORT_QIIME (manifest)	CACHED	0	2026-04-09 17:12:42.263	20.8s	20.7s	97.4%	1.4 GB	4 GB	191 MB	131.3 KB
-2	64/fa8ac2	781	DADA2_DENOISE (1)	FAILED	1	2026-04-09 17:30:47.287	37.1s	37.1s	-	-	-	-	-

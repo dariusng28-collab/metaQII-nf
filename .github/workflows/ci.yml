@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Fast, dependency-light gate: compile the workflow, build its DAG, and
+# syntax-check the Python helpers. This does not execute QIIME 2 (which needs
+# the multi-GB container); it catches wiring/typing/regression errors quickly.
+jobs:
+  lint-compile:
+    name: Compile & lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java (for Nextflow)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Nextflow
+        run: |
+          wget -qO- https://get.nextflow.io | bash
+          sudo mv nextflow /usr/local/bin/
+          nextflow -version
+
+      - name: Syntax-check Python helpers
+        run: python -m py_compile bin/*.py
+
+      - name: Regenerate portable toy dataset
+        run: python bin/make_toy_16s_dataset.py
+
+      - name: Compile workflow and build DAG (ITS example)
+        run: nextflow run main.nf -profile test -preview
+
+      - name: Compile workflow and build DAG (16S smoke)
+        run: nextflow run main.nf -profile smoke -preview
+
+      - name: Smoke-test the report generator
+        run: |
+          mkdir -p _rpt/plots/taxa_barplots
+          : > _rpt/table.qzv
+          : > _rpt/plots/taxa_barplots/genus_taxonomy.pdf
+          python bin/build_report.py --outdir _rpt --title "CI report"
+          test -f _rpt/index.html

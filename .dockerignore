@@ -1,0 +1,19 @@
+# Keep the build context small: only the env file is needed by the image.
+.git
+.github
+.nextflow*
+work/
+results/
+results_*/
+preview_results/
+smoke_results/
+*_results/
+__pycache__/
+*.py[cod]
+*.sif
+*.tar
+docs/
+preview_results/
+assets/smoke_test/fastq/
+*Zone.Identifier
+.Rhistory

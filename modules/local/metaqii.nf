@@ -18,17 +18,27 @@ process RUN_FASTQC {
 import csv
 import subprocess
 
-files = []
-with open("${input_source}", newline="") as handle:
-    reader = csv.DictReader(handle)
+# QIIME 2 manifests may be comma- or tab-separated. Sniff the delimiter
+# instead of assuming CSV so tab-separated manifests (the documented
+# default) are parsed correctly.
+path = "${input_source}"
+with open(path, newline="") as handle:
+    sample = handle.read(4096)
+    handle.seek(0)
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\\t")
+    except csv.Error:
+        dialect = csv.excel_tab if "\\t" in sample.splitlines()[0] else csv.excel
+    reader = csv.DictReader(handle, dialect=dialect)
+    files = []
     for row in reader:
         fastq = row.get("absolute-filepath")
         if fastq:
-            files.append(fastq)
+            files.append(fastq.strip())
 
 files = sorted(set(files))
 if not files:
-    raise SystemExit("No FASTQ files found in manifest ${input_source}")
+    raise SystemExit(f"No FASTQ files found in manifest {path}")
 
 subprocess.run(
     ["fastqc", "--threads", "${task.cpus}", "--outdir", "fastqc", *files],
@@ -47,6 +57,29 @@ PY
     """
 }
 
+process MULTIQC {
+    label 'qiime'
+    publishDir "${params.outdir}/00_qc/multiqc", mode: 'copy'
+
+    input:
+    path fastqc_dir
+
+    output:
+    path 'multiqc_report.html', emit: report, optional: true
+    path 'multiqc_data', optional: true
+
+    script:
+    // multiqc is an optional extra; guard so the run does not fail when it is
+    // absent (e.g. -profile standard against an environment without it).
+    """
+    if command -v multiqc >/dev/null 2>&1; then
+        multiqc "${fastqc_dir}" --filename multiqc_report.html
+    else
+        echo "[metaQII] multiqc not found in environment; skipping QC aggregation." >&2
+    fi
+    """
+}
+
 process IMPORT_QIIME {
     tag { input_mode }
     label 'qiime'
@@ -54,14 +87,15 @@ process IMPORT_QIIME {
 
     input:
     tuple val(input_mode), path(input_source)
+    val paired_end
 
     output:
     path 'demux.qza', emit: demux
 
     script:
-    def qiimeType = params.paired_end ? 'SampleData[PairedEndSequencesWithQuality]' : 'SampleData[SequencesWithQuality]'
+    def qiimeType = paired_end ? 'SampleData[PairedEndSequencesWithQuality]' : 'SampleData[SequencesWithQuality]'
     def qiimeFormat = input_mode == 'manifest'
-        ? (params.paired_end ? 'PairedEndFastqManifestPhred33V2' : 'SingleEndFastqManifestPhred33V2')
+        ? (paired_end ? 'PairedEndFastqManifestPhred33V2' : 'SingleEndFastqManifestPhred33V2')
         : 'CasavaOneEightSingleLanePerSampleDirFmt'
 
     """
@@ -73,18 +107,80 @@ process IMPORT_QIIME {
     """
 }
 
+process DEMUX_SUMMARIZE {
+    tag { label_name }
+    label 'qiime'
+    publishDir "${params.outdir}/03_summaries", mode: 'copy', pattern: '*.qzv'
+
+    input:
+    tuple val(label_name), path(demux_qza)
+
+    output:
+    path "${label_name}.qzv", emit: qzv
+
+    script:
+    """
+    qiime demux summarize \\
+      --i-data "${demux_qza}" \\
+      --o-visualization "${label_name}.qzv"
+    """
+}
+
+process CUTADAPT_TRIM {
+    label 'qiime'
+    publishDir "${params.outdir}/02_preprocessing", mode: 'copy', pattern: '*.qza'
+
+    input:
+    path demux_qza
+    val paired_end
+
+    output:
+    path 'primer-trimmed.qza', emit: trimmed
+
+    script:
+    def errRate = params.cutadapt_error_rate ?: 0.1
+    def discard = ((params.cutadapt_discard_untrimmed == null ? true : params.cutadapt_discard_untrimmed)
+                    ? '--p-discard-untrimmed' : '--p-no-discard-untrimmed')
+    def fwd = params.fwd_primer
+    def rev = params.rev_primer
+
+    if (paired_end) {
+        """
+        qiime cutadapt trim-paired \\
+          --i-demultiplexed-sequences "${demux_qza}" \\
+          --p-front-f ${fwd} \\
+          --p-front-r ${rev} \\
+          --p-error-rate ${errRate} \\
+          ${discard} \\
+          --p-cores ${task.cpus} \\
+          --o-trimmed-sequences primer-trimmed.qza
+        """
+    } else {
+        """
+        qiime cutadapt trim-single \\
+          --i-demultiplexed-sequences "${demux_qza}" \\
+          --p-front ${fwd} \\
+          --p-error-rate ${errRate} \\
+          ${discard} \\
+          --p-cores ${task.cpus} \\
+          --o-trimmed-sequences primer-trimmed.qza
+        """
+    }
+}
+
 process ITSXPRESS_TRIM {
     label 'qiime'
     publishDir "${params.outdir}/02_preprocessing", mode: 'copy', pattern: '*.qza'
 
     input:
     path demux_qza
+    val paired_end
 
     output:
     path 'trimmed_demux.qza', emit: trimmed_demux
 
     script:
-    def commandName = params.paired_end ? 'trim-pair-output-unmerged' : 'trim-single'
+    def commandName = paired_end ? 'trim-pair-output-unmerged' : 'trim-single'
 
     """
     qiime itsxpress ${commandName} \\
@@ -97,11 +193,12 @@ process ITSXPRESS_TRIM {
 }
 
 process DADA2_DENOISE {
-    label 'qiime'
+    label 'qiime_heavy'
     publishDir "${params.outdir}/02_preprocessing", mode: 'copy', pattern: '*.qza'
 
     input:
     path demux_qza
+    val paired_end
 
     output:
     path 'table.qza', emit: table
@@ -117,7 +214,7 @@ process DADA2_DENOISE {
     def truncLenF = (params.trunc_len_f ?: 0) as int
     def truncLenR = (params.trunc_len_r ?: 0) as int
 
-    if (params.paired_end) {
+    if (paired_end) {
         """
         qiime dada2 denoise-paired \\
           --i-demultiplexed-seqs "${demux_qza}" \\
@@ -150,6 +247,141 @@ process DADA2_DENOISE {
     }
 }
 
+process CLASSIFY_TAXONOMY {
+    label 'qiime_heavy'
+    publishDir "${params.outdir}/06_taxonomy", mode: 'copy', pattern: '*.qz*'
+
+    input:
+    path rep_seqs_qza
+    path classifier_qza
+    path ref_reads_qza
+    path ref_taxonomy_qza
+
+    output:
+    path 'taxonomy.qza', emit: taxonomy_qza
+    path 'taxonomy.qzv', emit: taxonomy_qzv
+    path 'vsearch-hits.qza', optional: true
+
+    script:
+    def method = (params.classification_method ?: 'sklearn').toString().toLowerCase()
+    def confidence = (params.classify_confidence ?: 0.7)
+    def readsPerBatch = (params.classify_reads_per_batch ?: 'auto').toString()
+    def percId = (params.vsearch_perc_identity ?: 0.8)
+    def maxAccepts = (params.vsearch_maxaccepts ?: 10)
+
+    if (method == 'vsearch') {
+        """
+        qiime feature-classifier classify-consensus-vsearch \\
+          --i-query "${rep_seqs_qza}" \\
+          --i-reference-reads "${ref_reads_qza}" \\
+          --i-reference-taxonomy "${ref_taxonomy_qza}" \\
+          --p-perc-identity ${percId} \\
+          --p-maxaccepts ${maxAccepts} \\
+          --p-threads ${task.cpus} \\
+          --o-classification taxonomy.qza \\
+          --o-search-results vsearch-hits.qza
+
+        qiime metadata tabulate \\
+          --m-input-file taxonomy.qza \\
+          --o-visualization taxonomy.qzv
+        """
+    } else {
+        """
+        qiime feature-classifier classify-sklearn \\
+          --i-classifier "${classifier_qza}" \\
+          --i-reads "${rep_seqs_qza}" \\
+          --p-confidence ${confidence} \\
+          --p-reads-per-batch ${readsPerBatch} \\
+          --p-n-jobs ${task.cpus} \\
+          --o-classification taxonomy.qza
+
+        qiime metadata tabulate \\
+          --m-input-file taxonomy.qza \\
+          --o-visualization taxonomy.qzv
+        """
+    }
+}
+
+process FILTER_TABLE {
+    label 'qiime'
+    publishDir "${params.outdir}/02_preprocessing/filtered", mode: 'copy', pattern: '*.qza'
+
+    input:
+    path table_qza
+    path rep_seqs_qza
+    path taxonomy_qza
+    path metadata_tsv
+    val filter_contaminants
+
+    output:
+    path 'filtered-table.qza', emit: table
+    path 'filtered-rep-seqs.qza', emit: rep_seqs
+    path 'decontam-scores.qza', optional: true
+
+    script:
+    def contaminantTaxa = (params.contaminant_taxa ?: 'mitochondria,chloroplast').toString()
+    def minSamples = (params.filter_min_samples ?: 1) as int
+    def minFrequency = (params.filter_min_frequency ?: 0) as int
+    def controlCol = params.decontam_control_column
+    def controlInd = (params.decontam_control_indicator ?: 'control').toString()
+    def decontamThreshold = (params.decontam_threshold ?: 0.1)
+
+    """
+    TABLE="${table_qza}"
+
+    # 0. Control-based decontamination (prevalence method) — optional.
+    if [[ -n "${controlCol ?: ''}" ]]; then
+        qiime quality-control decontam-identify \\
+          --i-table "\$TABLE" \\
+          --m-metadata-file "${metadata_tsv}" \\
+          --p-method prevalence \\
+          --p-prev-control-column "${controlCol}" \\
+          --p-prev-control-indicator "${controlInd}" \\
+          --o-decontam-scores decontam-scores.qza
+
+        # Keep non-contaminant features (decontam score p > threshold, or unscored).
+        qiime feature-table filter-features \\
+          --i-table "\$TABLE" \\
+          --m-metadata-file decontam-scores.qza \\
+          --p-where '[p]>${decontamThreshold} OR [p] IS NULL' \\
+          --o-filtered-table decontam-table.qza
+
+        # Drop the control samples themselves before downstream analysis.
+        qiime feature-table filter-samples \\
+          --i-table decontam-table.qza \\
+          --m-metadata-file "${metadata_tsv}" \\
+          --p-where "[${controlCol}]!='${controlInd}'" \\
+          --o-filtered-table decontam-samples-table.qza
+        TABLE=decontam-samples-table.qza
+    fi
+
+    # 1. Remove contaminant lineages (e.g. host mitochondria / chloroplast).
+    if [[ "${filter_contaminants}" == "true" ]]; then
+        qiime taxa filter-table \\
+          --i-table "\$TABLE" \\
+          --i-taxonomy "${taxonomy_qza}" \\
+          --p-exclude "${contaminantTaxa}" \\
+          --p-mode contains \\
+          --o-filtered-table taxa-filtered-table.qza
+    else
+        cp "\$TABLE" taxa-filtered-table.qza
+    fi
+
+    # 2. Drop low-prevalence / low-abundance features.
+    qiime feature-table filter-features \\
+      --i-table taxa-filtered-table.qza \\
+      --p-min-samples ${minSamples} \\
+      --p-min-frequency ${minFrequency} \\
+      --o-filtered-table filtered-table.qza
+
+    # 3. Keep representative sequences in sync with the filtered table.
+    qiime feature-table filter-seqs \\
+      --i-data "${rep_seqs_qza}" \\
+      --i-table filtered-table.qza \\
+      --o-filtered-data filtered-rep-seqs.qza
+    """
+}
+
 process SUMMARIZE_FEATURES {
     label 'qiime'
     publishDir "${params.outdir}/03_summaries", mode: 'copy', pattern: '*.qzv'
@@ -161,9 +393,9 @@ process SUMMARIZE_FEATURES {
     path metadata_tsv
 
     output:
-    path 'denoising-stats.qzv'
-    path 'table.qzv'
-    path 'rep-seqs.qzv'
+    path 'denoising-stats.qzv', emit: denoising_stats_qzv
+    path 'table.qzv', emit: table_qzv
+    path 'rep-seqs.qzv', emit: rep_seqs_qzv
 
     script:
     """
@@ -182,8 +414,30 @@ process SUMMARIZE_FEATURES {
     """
 }
 
-process BUILD_PHYLOGENY {
+process TAXA_BARPLOT {
     label 'qiime'
+    publishDir "${params.outdir}/06_taxonomy", mode: 'copy', pattern: '*.qzv'
+
+    input:
+    path table_qza
+    path taxonomy_qza
+    path metadata_tsv
+
+    output:
+    path 'taxa-bar-plots.qzv', emit: qzv
+
+    script:
+    """
+    qiime taxa barplot \\
+      --i-table "${table_qza}" \\
+      --i-taxonomy "${taxonomy_qza}" \\
+      --m-metadata-file "${metadata_tsv}" \\
+      --o-visualization taxa-bar-plots.qzv
+    """
+}
+
+process BUILD_PHYLOGENY {
+    label 'qiime_heavy'
     publishDir "${params.outdir}/04_phylogeny", mode: 'copy'
 
     input:
@@ -201,6 +455,29 @@ process BUILD_PHYLOGENY {
       --i-sequences "${rep_seqs_qza}" \\
       --p-n-threads ${task.cpus} \\
       --output-dir phylogeny
+    """
+}
+
+process BUILD_PHYLOGENY_SEPP {
+    label 'qiime_heavy'
+    publishDir "${params.outdir}/04_phylogeny", mode: 'copy'
+
+    input:
+    path rep_seqs_qza
+    path sepp_reference
+
+    output:
+    path 'sepp_tree.qza', emit: rooted_tree
+    path 'sepp_placements.qza'
+
+    script:
+    """
+    qiime fragment-insertion sepp \\
+      --i-representative-sequences "${rep_seqs_qza}" \\
+      --i-reference-database "${sepp_reference}" \\
+      --p-threads ${task.cpus} \\
+      --o-tree sepp_tree.qza \\
+      --o-placements sepp_placements.qza
     """
 }
 
@@ -249,13 +526,14 @@ process ALPHA_RAREFACTION {
     path metadata_tsv
     path rooted_tree
     val build_phylogeny
+    val max_depth
 
     output:
-    path 'alpha-rarefaction.qzv'
+    path 'alpha-rarefaction.qzv', emit: qzv
 
     script:
     def minDepth = (params.alpha_rarefaction_min_depth ?: 1) as int
-    def maxDepth = params.sampling_depth as int
+    def maxDepth = max_depth as int
     def steps = (params.alpha_rarefaction_steps ?: 10) as int
 
     """
@@ -335,43 +613,50 @@ process BETA_GROUP_SIGNIFICANCE {
     """
 }
 
-process CLASSIFY_TAXONOMY {
+process LONGITUDINAL {
     label 'qiime'
-    publishDir "${params.outdir}/06_taxonomy", mode: 'copy'
+    publishDir "${params.outdir}/05_diversity/longitudinal", mode: 'copy'
 
     input:
-    path rep_seqs_qza
-    path table_qza
+    path core_metrics_dir
     path metadata_tsv
-    path classifier_qza
 
     output:
-    path 'taxonomy.qza', emit: taxonomy_qza
-    path 'taxonomy.qzv'
-    path 'taxa-bar-plots.qzv'
+    path 'volatility.qzv', optional: true
 
     script:
+    def stateCol = params.longitudinal_state_column
+    def indivCol = params.longitudinal_individual_column
+    def metric = (params.longitudinal_metric ?: 'shannon_entropy').toString()
+
     """
-    qiime feature-classifier classify-sklearn \\
-      --i-classifier "${classifier_qza}" \\
-      --i-reads "${rep_seqs_qza}" \\
-      --o-classification taxonomy.qza
+    # Feed the Shannon vector as extra metadata so it is plottable, then guard
+    # the call so an unsuitable design warns instead of aborting the run.
+    EXTRA=""
+    if [[ -f "${core_metrics_dir}/shannon_vector.qza" ]]; then
+        EXTRA="--m-metadata-file ${core_metrics_dir}/shannon_vector.qza"
+    fi
 
-    qiime metadata tabulate \\
-      --m-input-file taxonomy.qza \\
-      --o-visualization taxonomy.qzv
-
-    qiime taxa barplot \\
-      --i-table "${table_qza}" \\
-      --i-taxonomy taxonomy.qza \\
+    set +e
+    qiime longitudinal volatility \\
       --m-metadata-file "${metadata_tsv}" \\
-      --o-visualization taxa-bar-plots.qzv
+      \$EXTRA \\
+      --p-state-column "${stateCol}" \\
+      --p-individual-id-column "${indivCol}" \\
+      --p-default-metric "${metric}" \\
+      --p-default-group-column "${params.metadata_column}" \\
+      --o-visualization volatility.qzv
+    status=\$?
+    set -e
+    if [[ \$status -ne 0 ]]; then
+        echo "[metaQII] longitudinal volatility skipped (exit \${status}); check state/individual columns." >&2
+    fi
     """
 }
 
-process ANCOM_SWEEP {
+process ANCOMBC2_SWEEP {
     label 'qiime'
-    publishDir "${params.outdir}/07_ancom", mode: 'copy'
+    publishDir "${params.outdir}/07_differential_abundance", mode: 'copy'
 
     input:
     path table_qza
@@ -379,31 +664,45 @@ process ANCOM_SWEEP {
     path metadata_tsv
 
     output:
-    path 'ancom'
+    path 'ancombc2'
 
     script:
     def startLevel = (params.taxonomy_start_level ?: 2) as int
+    def column = params.metadata_column
+    def sigThreshold = (params.da_significance_threshold ?: 0.05)
 
     """
-    mkdir -p ancom
+    mkdir -p ancombc2
 
     for level in \$(seq ${startLevel} 7); do
+        # ANCOM-BC2 needs at least two taxa to model; guard each level so a
+        # sparse collapse at one rank does not abort the whole sweep.
+        set +e
         qiime taxa collapse \\
           --i-table "${table_qza}" \\
           --i-taxonomy "${taxonomy_qza}" \\
           --p-level "\${level}" \\
-          --o-collapsed-table "ancom/collapsed-taxonomy-table-level\${level}.qza"
-
-        qiime composition add-pseudocount \\
-          --i-table "ancom/collapsed-taxonomy-table-level\${level}.qza" \\
-          --o-composition-table "ancom/comp-ancom-table-level\${level}.qza"
-
-        qiime composition ancom \\
-          --i-table "ancom/comp-ancom-table-level\${level}.qza" \\
+          --o-collapsed-table "ancombc2/collapsed-table-level\${level}.qza" \\
+        && qiime composition ancombc2 \\
+          --i-table "ancombc2/collapsed-table-level\${level}.qza" \\
           --m-metadata-file "${metadata_tsv}" \\
-          --m-metadata-column "${params.metadata_column}" \\
-          --o-visualization "ancom/ancom-results-level\${level}.qzv"
+          --p-fixed-effects-formula "${column}" \\
+          --o-ancombc2-output "ancombc2/ancombc2-level\${level}.qza" \\
+        && qiime composition ancombc2-visualizer \\
+          --i-data "ancombc2/ancombc2-level\${level}.qza" \\
+          --p-significance-threshold ${sigThreshold} \\
+          --o-visualization "ancombc2/ancombc2-level\${level}.qzv"
+        status=\$?
+        set -e
+        if [[ \$status -ne 0 ]]; then
+            echo "[metaQII] ANCOM-BC2 skipped at level \${level} (exit \${status}); continuing." >&2
+            rm -f "ancombc2/ancombc2-level\${level}.qza"
+        fi
     done
+
+    if ! ls ancombc2/*.qzv >/dev/null 2>&1; then
+        echo "[metaQII] WARNING: ANCOM-BC2 produced no results for any taxonomic level." >&2
+    fi
     """
 }
 
@@ -418,7 +717,7 @@ process PLOT_REPORTS {
     path metadata_tsv
 
     output:
-    path 'plots'
+    path 'plots', emit: plots
 
     script:
     """
@@ -467,5 +766,51 @@ process PLOT_REPORTS {
       --taxonomy plots/exports/taxonomy/taxonomy.tsv \\
       --outdir plots \\
       --top-n ${params.plot_top_n_taxa}
+    """
+}
+
+process BUILD_REPORT {
+    label 'qiime'
+    publishDir "${params.outdir}/09_report", mode: 'copy'
+
+    input:
+    path qzv_files
+    path plots_dir
+
+    output:
+    path 'index.html'
+    path '*.qzv'
+    path "${plots_dir}"
+
+    script:
+    // The collected .qzv files and the plots directory are staged into the
+    // task directory under their own names, so build_report.py scans them in
+    // place; publishing re-exports them into a self-contained report folder.
+    """
+    python "${projectDir}/bin/build_report.py" \\
+      --outdir . \\
+      --title "metaQII-nf report"
+    """
+}
+
+process DUMP_VERSIONS {
+    label 'qiime'
+    publishDir "${params.outdir}/pipeline_info", mode: 'copy'
+
+    output:
+    path 'software_versions.yml'
+
+    script:
+    // Each tool is guarded so a missing binary records "n/a" rather than
+    // failing the run; this file makes results traceable to exact versions.
+    """
+    {
+      echo "metaQII-nf: '${workflow.manifest.version ?: 'unknown'}'"
+      echo "nextflow: '${workflow.nextflow.version}'"
+      echo "qiime2: '\$(qiime --version 2>/dev/null | head -n1 | sed 's/^q2cli version //;s/\\r//' || echo n/a)'"
+      echo "fastqc: '\$(fastqc --version 2>/dev/null | sed 's/^FastQC //' || echo n/a)'"
+      echo "itsxpress: '\$(itsxpress --version 2>/dev/null || echo n/a)'"
+      echo "python: '\$(python --version 2>&1 | sed 's/^Python //' || echo n/a)'"
+    } > software_versions.yml
     """
 }
